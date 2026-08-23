@@ -1,0 +1,15 @@
+{
+  "name": "@known-universe/render-three",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@known-universe/core": "*",
+    "@known-universe/engine": "*",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.4"
+  }
+}
