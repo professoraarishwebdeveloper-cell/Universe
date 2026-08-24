@@ -2371,3 +2371,4 @@ export function interpolateCamera(
 }
 
 export const ENGINE_VERSION = 2;
+export * from "./procedural";
