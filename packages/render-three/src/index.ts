@@ -1,286 +1,1707 @@
-// UNIVERSE_RENDERER_FOUNDATION_REPAIR_V1
-import * as THREECompat from "three";
-import type * as CoreCompat from "@known-universe/core";
-import type * as EngineCompat from "@known-universe/engine";
+﻿import {
+  AdditiveBlending,
+  BufferAttribute,
+  BufferGeometry,
+  Color,
+  Group,
+  LineBasicMaterial,
+  LineLoop,
+  Mesh,
+  MeshBasicMaterial,
+  NormalBlending,
+  PerspectiveCamera,
+  Points,
+  PointsMaterial,
+  Raycaster,
+  REVISION,
+  Scene,
+  SphereGeometry,
+  SRGBColorSpace,
+  Vector2,
+  Vector3,
+  WebGLRenderer,
+} from "three";
 
-type EntityId = CoreCompat.EntityId;
-type EntityKind = CoreCompat.EntityKind;
-type SpaceEntity = CoreCompat.SpaceEntity;
-type Vec3 = CoreCompat.Vec3;
-type UniverseState = EngineCompat.UniverseState;
-type RenderFrame = EngineCompat.RenderFrame;
+import { METERS_PER_UNIT } from "@known-universe/core";
 
-const Vector3 = THREECompat.Vector3;
-type Vector3 = THREECompat.Vector3;
+import type {
+  DistanceUnit,
+  EntityId,
+  EntityKind,
+  FrameId,
+  SpaceEntity,
+  SpatialPosition,
+  Vec3,
+} from "@known-universe/core";
 
-const PerspectiveCamera = THREECompat.PerspectiveCamera;
-type PerspectiveCamera = THREECompat.PerspectiveCamera;
+import type {
+  RenderFrame,
+  UniverseRenderer,
+  UniverseState,
+} from "@known-universe/engine";
 
-const Group = THREECompat.Group;
-type Group = THREECompat.Group;
+export const RENDER_THREE_VERSION = 2;
 
-const Scene = THREECompat.Scene;
-type Scene = THREECompat.Scene;
-
-const WebGLRenderer = THREECompat.WebGLRenderer;
-type WebGLRenderer = THREECompat.WebGLRenderer;
-
-const Color = THREECompat.Color;
-type Color = THREECompat.Color;
-
-function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.min(max, Math.max(min, value));
-}
-
-function scientificValueNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-
-  if (
-    value &&
-    typeof value === "object" &&
-    "value" in value &&
-    typeof (value as { value?: unknown }).value === "number"
-  ) {
-    const numberValue = (value as { value: number }).value;
-    return Number.isFinite(numberValue) ? numberValue : null;
+function clamp(value: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) {
+    return minimum;
   }
 
-  return null;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function positiveFinite(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+
+  return value;
+}
+
+function degreesToRadians(degrees: number | undefined): number {
+  if (degrees === undefined || !Number.isFinite(degrees)) {
+    return 0;
+  }
+
+  return (degrees * Math.PI) / 180;
 }
 
 function entityRadiusMeters(entity: SpaceEntity): number {
-  const physical = (entity as unknown as { physical?: Record<string, unknown> })
-    .physical;
+  const radius = entity.physical?.radiusM?.value;
 
-  const candidates = [
-    physical?.radiusM,
-    physical?.meanRadiusM,
-    physical?.equatorialRadiusM,
-    physical?.diameterM,
-  ];
-
-  for (const candidate of candidates) {
-    const value = scientificValueNumber(candidate);
-    if (value !== null && value > 0) {
-      return candidate === physical?.diameterM ? value / 2 : value;
-    }
+  if (radius !== undefined && Number.isFinite(radius) && radius > 0) {
+    return radius;
   }
 
   return 1;
 }
 
+function minimumMarkerRadius(kind: EntityKind): number {
+  switch (kind) {
+    case "star":
+      return 0.045;
+
+    case "planet":
+    case "dwarf-planet":
+      return 0.035;
+
+    case "moon":
+      return 0.025;
+
+    case "black-hole":
+    case "neutron-star":
+      return 0.035;
+
+    case "galaxy":
+    case "galaxy-group":
+    case "galaxy-cluster":
+    case "cosmic-structure":
+      return 0.06;
+
+    case "nebula":
+    case "star-cluster":
+      return 0.045;
+
+    case "asteroid":
+    case "comet":
+    case "satellite":
+    case "spacecraft":
+    case "debris":
+      return 0.012;
+
+    case "surface-feature":
+    case "building":
+    case "city":
+    case "country":
+      return 0.02;
+  }
+}
+
 function entitySceneRadius(
   entity: SpaceEntity,
   metersPerSceneUnit = 1,
-  minimum = 0.0005,
+  minimum?: number,
 ): number {
-  const divisor =
-    Number.isFinite(metersPerSceneUnit) && metersPerSceneUnit > 0
-      ? metersPerSceneUnit
-      : 1;
+  const divisor = positiveFinite(metersPerSceneUnit, 1);
 
-  return Math.max(minimum, entityRadiusMeters(entity) / divisor);
+  const physical = entityRadiusMeters(entity) / divisor;
+
+  const markerMinimum = minimum ?? minimumMarkerRadius(entity.kind);
+
+  return clamp(Math.max(physical, markerMinimum), markerMinimum, 1e9);
 }
 
 function entityDisplayColor(kind: EntityKind): Color {
-  switch (String(kind)) {
+  switch (kind) {
     case "star":
-      return new Color(0xfff1c2);
+      return new Color(0xffe3a6);
+
     case "planet":
-      return new Color(0x6fa8ff);
+      return new Color(0x5f9df7);
+
+    case "dwarf-planet":
+      return new Color(0x8ca7c7);
+
     case "moon":
-      return new Color(0xc8c8c8);
-    case "asteroid":
-    case "comet":
-      return new Color(0x9b8c7a);
+      return new Color(0xbec6d1);
+
     case "black-hole":
-    case "blackHole":
-      return new Color(0x4f4b67);
-    case "galaxy":
-      return new Color(0xa98cff);
-    case "nebula":
-      return new Color(0xd67bd8);
+      return new Color(0x171821);
+
+    case "neutron-star":
+      return new Color(0xdde8ff);
+
+    case "asteroid":
+      return new Color(0x9b8b78);
+
+    case "comet":
+      return new Color(0xa8d8e8);
+
     case "satellite":
+      return new Color(0x83d9ff);
+
+    case "spacecraft":
+      return new Color(0xf0d18a);
+
     case "debris":
-      return new Color(0x8fd3ff);
-    default:
-      return new Color(0xffffff);
+      return new Color(0xd99b61);
+
+    case "nebula":
+      return new Color(0xb071c9);
+
+    case "star-cluster":
+      return new Color(0xe4d8ff);
+
+    case "galaxy":
+      return new Color(0x9dbfff);
+
+    case "galaxy-group":
+      return new Color(0x9b9bea);
+
+    case "galaxy-cluster":
+      return new Color(0xa78bfa);
+
+    case "cosmic-structure":
+      return new Color(0x7f8fb5);
+
+    case "surface-feature":
+      return new Color(0x8da87e);
+
+    case "building":
+      return new Color(0xc4c8ce);
+
+    case "city":
+      return new Color(0xffd37a);
+
+    case "country":
+      return new Color(0x91b8d9);
   }
 }
 
-interface RendererStats {
-  [key: string]: any;
+export interface RendererStats {
   drawCalls: number;
+
   triangles: number;
+
   points: number;
+
   lines: number;
+
   objects: number;
+
+  sceneObjects: number;
+
   frameMs: number;
+
   visibleEntities: number;
+
   backend: string;
 }
 
-const rendererInfo = {
+export const rendererInfo = {
   backend: "three",
-  revision: THREECompat.REVISION,
+
+  revision: REVISION,
 } as const;
 
-class CompatDynamic {
-  [key: string]: any;
+/*
+ * Reference-frame integration
+ *
+ * The renderer never pretends that two unrelated reference
+ * frames share one universal XYZ system.
+ *
+ * Same-frame positions work without a provider. Cross-frame
+ * transforms require an explicit FrameTransformProvider.
+ */
 
-  constructor() {
-    return new Proxy(this, {
-      get(target, property, receiver) {
-        if (Reflect.has(target, property)) {
-          return Reflect.get(target, property, receiver);
-        }
+export interface FrameTransformContext {
+  entity: SpaceEntity;
 
-        if (typeof property === "string") {
-          return (..._args: unknown[]) => undefined;
-        }
+  state: UniverseState;
 
-        return undefined;
-      },
-    });
-  }
+  fromFrameId: FrameId;
+
+  toFrameId: FrameId;
+
+  sourceUnit: DistanceUnit;
+
+  positionMeters: Vec3;
 }
 
-class FrameSpace extends CompatDynamic {
-  toVector3(position: any): Vector3 {
-    if (position instanceof Vector3) return position.clone();
+export interface FrameTransformProvider {
+  transform(context: FrameTransformContext): Vec3 | null;
+}
+
+function spatialMeters(spatial: SpatialPosition): Vec3 {
+  const multiplier = METERS_PER_UNIT[spatial.unit];
+
+  return [
+    spatial.position[0] * multiplier,
+
+    spatial.position[1] * multiplier,
+
+    spatial.position[2] * multiplier,
+  ];
+}
+
+function sceneUnits(positionMeters: Vec3, metersPerSceneUnit: number): Vector3 {
+  const divisor = positiveFinite(metersPerSceneUnit, 1);
+
+  return new Vector3(
+    positionMeters[0] / divisor,
+
+    positionMeters[1] / divisor,
+
+    positionMeters[2] / divisor,
+  );
+}
+
+export class FrameSpace {
+  private transformProvider: FrameTransformProvider | null;
+
+  constructor(transformProvider: FrameTransformProvider | null = null) {
+    this.transformProvider = transformProvider;
+  }
+
+  setTransformProvider(provider: FrameTransformProvider | null): void {
+    this.transformProvider = provider;
+  }
+
+  toVector3(position: Vec3 | Vector3): Vector3 {
+    if (position instanceof Vector3) {
+      return position.clone();
+    }
+
     return new Vector3(position[0], position[1], position[2]);
   }
 
-  resolve(position: any, ..._args: unknown[]): Vector3 {
-    return this.toVector3(position);
+  toScene(positionMeters: Vec3, metersPerSceneUnit: number): Vector3 {
+    return sceneUnits(positionMeters, metersPerSceneUnit);
   }
 
-  resolvePosition(position: any, ..._args: unknown[]): Vector3 {
-    return this.toVector3(position);
-  }
+  resolve(entity: SpaceEntity, state: UniverseState): Vector3 | null {
+    const spatial = entity.spatial;
 
-  toScene(position: any, ..._args: unknown[]): Vector3 {
-    return this.toVector3(position);
+    if (!spatial) {
+      return null;
+    }
+
+    const originalMeters = spatialMeters(spatial);
+
+    let targetMeters: Vec3;
+
+    if (spatial.frameId === state.scale.frameId) {
+      targetMeters = originalMeters;
+    } else {
+      const provider = this.transformProvider;
+
+      if (!provider) {
+        return null;
+      }
+
+      const transformed = provider.transform({
+        entity,
+
+        state,
+
+        fromFrameId: spatial.frameId,
+
+        toFrameId: state.scale.frameId,
+
+        sourceUnit: spatial.unit,
+
+        positionMeters: originalMeters,
+      });
+
+      if (transformed === null) {
+        return null;
+      }
+
+      targetMeters = transformed;
+    }
+
+    if (!targetMeters.every((value) => Number.isFinite(value))) {
+      return null;
+    }
+
+    return sceneUnits(targetMeters, state.scale.metersPerUnit);
   }
 }
 
-class EntitySceneIndex extends CompatDynamic {
-  private readonly entries = new Map<EntityId, any>();
+/*
+ * Floating origin
+ *
+ * The scientific position remains absolute in its active
+ * reference frame. Only the rendering copy is translated
+ * near the origin to preserve GPU precision.
+ */
 
-  get(id: EntityId): any {
-    return this.entries.get(id);
+export class FloatingOrigin {
+  private readonly value = new Vector3();
+
+  set(position: Vec3 | Vector3): void {
+    if (position instanceof Vector3) {
+      this.value.copy(position);
+
+      return;
+    }
+
+    this.value.set(position[0], position[1], position[2]);
   }
 
-  set(id: EntityId, value: any): this {
-    this.entries.set(id, value);
+  setFromState(state: UniverseState): void {
+    this.set(state.camera.position);
+  }
+
+  toLocal(
+    absolute: Vector3,
+
+    target = new Vector3(),
+  ): Vector3 {
+    return target.copy(absolute).sub(this.value);
+  }
+
+  toAbsolute(
+    local: Vector3,
+
+    target = new Vector3(),
+  ): Vector3 {
+    return target.copy(local).add(this.value);
+  }
+
+  get origin(): Vector3 {
+    return this.value.clone();
+  }
+}
+
+export type EntityMesh = Mesh<SphereGeometry, MeshBasicMaterial>;
+
+export interface EntitySceneEntry {
+  id: EntityId;
+
+  entity: SpaceEntity;
+
+  object: EntityMesh;
+
+  position: Vector3;
+
+  radius: number;
+}
+
+export class EntitySceneIndex {
+  private readonly entriesValue = new Map<EntityId, EntitySceneEntry>();
+
+  get(id: EntityId): EntitySceneEntry | undefined {
+    return this.entriesValue.get(id);
+  }
+
+  set(id: EntityId, value: EntitySceneEntry): this {
+    if (value.id !== id) {
+      throw new Error("EntitySceneIndex id mismatch.");
+    }
+
+    this.entriesValue.set(id, value);
+
     return this;
   }
 
   has(id: EntityId): boolean {
-    return this.entries.has(id);
+    return this.entriesValue.has(id);
   }
 
   delete(id: EntityId): boolean {
-    return this.entries.delete(id);
+    return this.entriesValue.delete(id);
   }
 
   clear(): void {
-    this.entries.clear();
+    this.entriesValue.clear();
   }
 
-  values(): IterableIterator<any> {
-    return this.entries.values();
+  getPosition(id: EntityId): Vector3 | undefined {
+    return this.entriesValue.get(id)?.position;
+  }
+
+  getObject(id: EntityId): EntityMesh | undefined {
+    return this.entriesValue.get(id)?.object;
+  }
+
+  values(): IterableIterator<EntitySceneEntry> {
+    return this.entriesValue.values();
   }
 
   keys(): IterableIterator<EntityId> {
-    return this.entries.keys();
+    return this.entriesValue.keys();
   }
 
-  entriesIterator(): IterableIterator<[EntityId, any]> {
-    return this.entries.entries();
+  entriesIterator(): IterableIterator<[EntityId, EntitySceneEntry]> {
+    return this.entriesValue.entries();
+  }
+
+  get size(): number {
+    return this.entriesValue.size;
   }
 }
 
-class PickingController extends CompatDynamic {
+/*
+ * Real ray-cast picking.
+ *
+ * The old compatibility implementation always returned null.
+ */
+
+export class PickingController {
   enabled = true;
+
+  private readonly raycaster = new Raycaster();
+
+  private readonly pointer = new Vector2();
+
+  private camera: PerspectiveCamera | null = null;
+
+  private canvas: HTMLCanvasElement | null = null;
+
+  private index: EntitySceneIndex | null = null;
+
+  constructor(
+    camera?: PerspectiveCamera,
+
+    canvas?: HTMLCanvasElement,
+
+    index?: EntitySceneIndex,
+  ) {
+    this.raycaster.params.Points.threshold = 4;
+
+    if (camera && canvas && index) {
+      this.configure(camera, canvas, index);
+    }
+  }
+
+  configure(
+    camera: PerspectiveCamera,
+
+    canvas: HTMLCanvasElement,
+
+    index: EntitySceneIndex,
+  ): void {
+    this.camera = camera;
+
+    this.canvas = canvas;
+
+    this.index = index;
+  }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
   }
 
-  pick(..._args: unknown[]): any {
-    return null;
+  pick(clientX: number, clientY: number): EntityId | undefined {
+    if (!this.enabled || !this.camera || !this.canvas || !this.index) {
+      return undefined;
+    }
+
+    const rectangle = this.canvas.getBoundingClientRect();
+
+    if (rectangle.width <= 0 || rectangle.height <= 0) {
+      return undefined;
+    }
+
+    this.pointer.set(
+      ((clientX - rectangle.left) / rectangle.width) * 2 - 1,
+
+      -((clientY - rectangle.top) / rectangle.height) * 2 + 1,
+    );
+
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const targets: EntityMesh[] = [];
+
+    for (const entry of this.index.values()) {
+      if (entry.object.visible) {
+        targets.push(entry.object);
+      }
+    }
+
+    const hits = this.raycaster.intersectObjects(targets, false);
+
+    for (const hit of hits) {
+      const id = hit.object.userData["entityId"];
+
+      if (typeof id === "string") {
+        return id;
+      }
+    }
+
+    return undefined;
   }
 
-  clear(): void {}
-  dispose(): void {}
+  clear(): void {
+    this.pointer.set(0, 0);
+  }
+
+  dispose(): void {
+    this.clear();
+
+    this.camera = null;
+
+    this.canvas = null;
+
+    this.index = null;
+  }
 }
 
-class PackedPointLayer extends CompatDynamic {
-  readonly root = new Group();
+/*
+ * GPU packed point layer.
+ *
+ * Used for dense catalogs such as stars, orbital debris and
+ * galaxy fields. This uses one draw object instead of one
+ * Three.js object per catalog entry.
+ */
+
+export class PackedPointLayer {
+  readonly geometry = new BufferGeometry();
+
+  readonly material: PointsMaterial;
+
+  readonly object: Points<BufferGeometry, PointsMaterial>;
+
   private countValue = 0;
+
   private densityValue = 1;
 
-  constructor(..._args: unknown[]) {
-    super();
+  private requestedVisible = true;
+
+  private readonly capacity: number;
+
+  constructor(
+    capacity = 100_000,
+
+    size = 1,
+
+    color = 0xffffff,
+  ) {
+    this.capacity = Math.max(1, Math.floor(capacity));
+
+    this.material = new PointsMaterial({
+      color,
+
+      size: positiveFinite(size, 1),
+
+      sizeAttenuation: true,
+
+      transparent: true,
+
+      opacity: 1,
+
+      depthWrite: false,
+
+      blending: AdditiveBlending,
+    });
+
+    this.object = new Points(this.geometry, this.material);
+
+    this.object.name = "packed-point-layer";
+
+    this.object.frustumCulled = true;
+
+    this.replace(new Float32Array());
+  }
+
+  get root(): Points<BufferGeometry, PointsMaterial> {
+    return this.object;
   }
 
   get count(): number {
     return this.countValue;
   }
 
-  setDensity(value: number): void {
-    this.densityValue = clamp(value, 0, 1);
-    this.root.visible = this.densityValue > 0;
+  private updateDrawRange(): void {
+    const visibleCount = Math.floor(this.countValue * this.densityValue);
+
+    this.geometry.setDrawRange(0, visibleCount);
+
+    this.object.visible = this.requestedVisible && visibleCount > 0;
   }
 
-  setVisible(visible: boolean): void {
-    this.root.visible = visible;
-  }
-
-  setPoints(
-    positions: readonly Vec3[] | Float32Array,
-    ..._args: unknown[]
-  ): void {
-    this.countValue =
+  private buildBuffer(positions: readonly Vec3[] | Float32Array): Float32Array {
+    const sourceCount =
       positions instanceof Float32Array
         ? Math.floor(positions.length / 3)
         : positions.length;
+
+    const maximum = Math.min(this.capacity, sourceCount);
+
+    const data = new Float32Array(maximum * 3);
+
+    let written = 0;
+
+    for (
+      let index = 0;
+      index < sourceCount && written < this.capacity;
+      index++
+    ) {
+      let x: number | undefined;
+
+      let y: number | undefined;
+
+      let z: number | undefined;
+
+      if (positions instanceof Float32Array) {
+        const offset = index * 3;
+
+        x = positions[offset];
+
+        y = positions[offset + 1];
+
+        z = positions[offset + 2];
+      } else {
+        const point = positions[index];
+
+        if (!point) {
+          continue;
+        }
+
+        x = point[0];
+
+        y = point[1];
+
+        z = point[2];
+      }
+
+      if (
+        x === undefined ||
+        y === undefined ||
+        z === undefined ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !Number.isFinite(z)
+      ) {
+        continue;
+      }
+
+      const target = written * 3;
+
+      data[target] = x;
+
+      data[target + 1] = y;
+
+      data[target + 2] = z;
+
+      written++;
+    }
+
+    if (written === maximum) {
+      return data;
+    }
+
+    return data.slice(0, written * 3);
   }
 
-  update(positions: readonly Vec3[] | Float32Array, ...args: unknown[]): void {
-    this.setPoints(positions, ...args);
+  replace(positions: readonly Vec3[] | Float32Array): void {
+    const data = this.buildBuffer(positions);
+
+    this.countValue = Math.floor(data.length / 3);
+
+    this.geometry.setAttribute("position", new BufferAttribute(data, 3));
+
+    if (this.countValue > 0) {
+      this.geometry.computeBoundingSphere();
+    } else {
+      this.geometry.boundingSphere = null;
+    }
+
+    this.updateDrawRange();
+  }
+
+  setPoints(positions: readonly Vec3[] | Float32Array): void {
+    this.replace(positions);
+  }
+
+  update(positions: readonly Vec3[] | Float32Array): void {
+    this.replace(positions);
+  }
+
+  setDensity(value: number): void {
+    this.densityValue = clamp(value, 0, 1);
+
+    this.updateDrawRange();
+  }
+
+  setVisible(visible: boolean): void {
+    this.requestedVisible = visible;
+
+    this.updateDrawRange();
+  }
+
+  setOpacity(value: number): void {
+    this.material.opacity = clamp(value, 0, 1);
+
+    this.material.transparent = this.material.opacity < 1;
+  }
+
+  setSize(value: number): void {
+    this.material.size = positiveFinite(value, 1);
+  }
+
+  setColor(value: number): void {
+    this.material.color.setHex(value);
   }
 
   clear(): void {
-    this.countValue = 0;
+    this.replace(new Float32Array());
   }
 
   dispose(): void {
-    this.root.clear();
+    this.object.removeFromParent();
+
+    this.geometry.dispose();
+
+    this.material.dispose();
   }
 }
 
-class ThreeUniverseRenderer extends CompatDynamic {
+interface OrbitSceneEntry {
+  line: LineLoop<BufferGeometry, LineBasicMaterial>;
+
+  signature: string;
+}
+
+function orbitSignature(
+  entity: SpaceEntity,
+  metersPerUnit: number,
+  samples: number,
+): string {
+  const orbit = entity.orbit;
+
+  if (!orbit) {
+    return "";
+  }
+
+  return [
+    orbit.semiMajorAxisM ?? "",
+
+    orbit.eccentricity ?? "",
+
+    orbit.inclinationDeg ?? "",
+
+    orbit.longitudeAscendingNodeDeg ?? "",
+
+    orbit.argumentPeriapsisDeg ?? "",
+
+    metersPerUnit,
+
+    samples,
+  ].join(":");
+}
+
+function createOrbitGeometry(
+  entity: SpaceEntity,
+  metersPerUnit: number,
+  samples: number,
+): BufferGeometry | null {
+  const orbit = entity.orbit;
+
+  const semiMajorMeters = orbit?.semiMajorAxisM;
+
+  if (
+    orbit === undefined ||
+    semiMajorMeters === undefined ||
+    !Number.isFinite(semiMajorMeters) ||
+    semiMajorMeters <= 0
+  ) {
+    return null;
+  }
+
+  const divisor = positiveFinite(metersPerUnit, 1);
+
+  const semiMajor = semiMajorMeters / divisor;
+
+  if (!Number.isFinite(semiMajor) || semiMajor <= 0) {
+    return null;
+  }
+
+  const eccentricity = clamp(orbit.eccentricity ?? 0, 0, 0.999999);
+
+  const semiMinor =
+    semiMajor * Math.sqrt(Math.max(0, 1 - eccentricity * eccentricity));
+
+  const inclination = degreesToRadians(orbit.inclinationDeg);
+
+  const ascendingNode = degreesToRadians(orbit.longitudeAscendingNodeDeg);
+
+  const periapsis = degreesToRadians(orbit.argumentPeriapsisDeg);
+
+  const cosI = Math.cos(inclination);
+
+  const sinI = Math.sin(inclination);
+
+  const cosNode = Math.cos(ascendingNode);
+
+  const sinNode = Math.sin(ascendingNode);
+
+  const cosPeriapsis = Math.cos(periapsis);
+
+  const sinPeriapsis = Math.sin(periapsis);
+
+  const count = Math.max(24, Math.floor(samples));
+
+  const positions = new Float32Array(count * 3);
+
+  for (let index = 0; index < count; index++) {
+    const eccentricAnomaly = (index / count) * Math.PI * 2;
+
+    const orbitalX = semiMajor * (Math.cos(eccentricAnomaly) - eccentricity);
+
+    const orbitalY = semiMinor * Math.sin(eccentricAnomaly);
+
+    const periapsisX = cosPeriapsis * orbitalX - sinPeriapsis * orbitalY;
+
+    const periapsisY = sinPeriapsis * orbitalX + cosPeriapsis * orbitalY;
+
+    const x = cosNode * periapsisX - sinNode * cosI * periapsisY;
+
+    const y = sinNode * periapsisX + cosNode * cosI * periapsisY;
+
+    const z = sinI * periapsisY;
+
+    const offset = index * 3;
+
+    positions[offset] = x;
+
+    positions[offset + 1] = y;
+
+    positions[offset + 2] = z;
+  }
+
+  const geometry = new BufferGeometry();
+
+  geometry.setAttribute("position", new BufferAttribute(positions, 3));
+
+  geometry.computeBoundingSphere();
+
+  return geometry;
+}
+
+export interface ThreeUniverseRendererOptions {
+  background?: number;
+
+  antialias?: boolean;
+
+  alpha?: boolean;
+
+  detailedObjectLimit?: number;
+
+  frameTransformProvider?: FrameTransformProvider;
+
+  extensions?: UniverseRendererExtensionOptions;
+}
+
+/*
+ * Concrete renderer.
+ *
+ * This replaces the former no-op compatibility implementation.
+ */
+
+export class ThreeUniverseRenderer implements UniverseRenderer {
+  readonly name = "Three.js Universe Renderer";
+
   readonly rendererInfo = rendererInfo;
+
   readonly stats: RendererStats = {
     backend: rendererInfo.backend,
+
     drawCalls: 0,
+
     triangles: 0,
+
     points: 0,
+
     lines: 0,
+
     objects: 0,
+
+    sceneObjects: 0,
+
     frameMs: 0,
+
     visibleEntities: 0,
   };
 
-  render(..._args: unknown[]): void {}
-  resize(..._args: unknown[]): void {}
-  dispose(): void {}
+  readonly frameSpace: FrameSpace;
+
+  readonly floatingOrigin = new FloatingOrigin();
+
+  readonly index = new EntitySceneIndex();
+
+  readonly worldRoot = new Group();
+
+  readonly entityRoot = new Group();
+
+  readonly orbitRoot = new Group();
+
+  readonly extensions: UniverseRendererExtensions;
+
+  private readonly orbitEntries = new Map<EntityId, OrbitSceneEntry>();
+
+  private readonly unitSphere = new SphereGeometry(1, 24, 16);
+
+  private readonly detailedObjectLimit: number;
+
+  private readonly background: number;
+
+  private readonly antialias: boolean;
+
+  private readonly alpha: boolean;
+
+  private rendererValue: WebGLRenderer | null = null;
+
+  private cameraValue: PerspectiveCamera | null = null;
+
+  private sceneValue: Scene | null = null;
+
+  private pickingValue: PickingController | null = null;
+
+  private containerValue: HTMLElement | null = null;
+
+  private width = 1;
+
+  private height = 1;
+
+  private lastVisibleCount = -1;
+
+  constructor(options: ThreeUniverseRendererOptions = {}) {
+    this.background = options.background ?? 0x01030a;
+
+    this.antialias = options.antialias ?? true;
+
+    this.alpha = options.alpha ?? false;
+
+    this.detailedObjectLimit = Math.max(
+      100,
+      Math.floor(options.detailedObjectLimit ?? 10_000),
+    );
+
+    this.frameSpace = new FrameSpace(options.frameTransformProvider ?? null);
+
+    this.extensions = new UniverseRendererExtensions(options.extensions);
+
+    this.worldRoot.name = "universe-world";
+
+    this.entityRoot.name = "universe-entities";
+
+    this.orbitRoot.name = "universe-orbits";
+
+    this.worldRoot.add(this.orbitRoot);
+
+    this.worldRoot.add(this.entityRoot);
+  }
+
+  async initialize(container: HTMLElement): Promise<void> {
+    if (this.rendererValue) {
+      throw new Error("ThreeUniverseRenderer is already initialized.");
+    }
+
+    this.containerValue = container;
+
+    if (typeof window !== "undefined") {
+      const style = window.getComputedStyle(container);
+
+      if (style.position === "static") {
+        container.style.position = "relative";
+      }
+    }
+
+    const renderer = new WebGLRenderer({
+      antialias: this.antialias,
+
+      alpha: this.alpha,
+
+      logarithmicDepthBuffer: true,
+
+      powerPreference: "high-performance",
+    });
+
+    renderer.outputColorSpace = SRGBColorSpace;
+
+    renderer.domElement.classList.add("universe-three-canvas");
+
+    Object.assign(renderer.domElement.style, {
+      display: "block",
+
+      width: "100%",
+
+      height: "100%",
+
+      outline: "none",
+
+      touchAction: "none",
+    });
+
+    const scene = new Scene();
+
+    if (!this.alpha) {
+      scene.background = new Color(this.background);
+    }
+
+    const camera = new PerspectiveCamera(60, 1, 1e-7, 1e12);
+
+    camera.position.set(0, 0, 0);
+
+    scene.add(this.worldRoot);
+
+    container.appendChild(renderer.domElement);
+
+    const picking = new PickingController(
+      camera,
+      renderer.domElement,
+      this.index,
+    );
+
+    this.rendererValue = renderer;
+
+    this.sceneValue = scene;
+
+    this.cameraValue = camera;
+
+    this.pickingValue = picking;
+
+    this.extensions.initialize(
+      container,
+      renderer,
+      camera,
+      this.worldRoot,
+      this.index,
+      picking,
+    );
+
+    await this.extensions.plugins.activateAll();
+
+    const initialWidth = Math.max(1, container.clientWidth || 1);
+
+    const initialHeight = Math.max(1, container.clientHeight || 1);
+
+    const initialRatio =
+      typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+
+    this.resize(initialWidth, initialHeight, initialRatio);
+  }
+
+  private requireRenderer(): WebGLRenderer {
+    const renderer = this.rendererValue;
+
+    if (!renderer) {
+      throw new Error("ThreeUniverseRenderer has not been initialized.");
+    }
+
+    return renderer;
+  }
+
+  private requireScene(): Scene {
+    const scene = this.sceneValue;
+
+    if (!scene) {
+      throw new Error("ThreeUniverseRenderer has not been initialized.");
+    }
+
+    return scene;
+  }
+
+  private requireCamera(): PerspectiveCamera {
+    const camera = this.cameraValue;
+
+    if (!camera) {
+      throw new Error("ThreeUniverseRenderer has not been initialized.");
+    }
+
+    return camera;
+  }
+
+  private buildDesiredEntityIds(frame: RenderFrame): Set<EntityId> {
+    const result = new Set<EntityId>();
+
+    const state = frame.state;
+
+    if (state.focusId !== undefined && state.entities.has(state.focusId)) {
+      result.add(state.focusId);
+    }
+
+    if (
+      state.selectedId !== undefined &&
+      state.entities.has(state.selectedId)
+    ) {
+      result.add(state.selectedId);
+    }
+
+    for (const id of frame.visibleEntityIds) {
+      if (result.size >= this.detailedObjectLimit) {
+        break;
+      }
+
+      if (state.entities.has(id)) {
+        result.add(id);
+      }
+    }
+
+    return result;
+  }
+
+  private removeEntity(id: EntityId): void {
+    const entry = this.index.get(id);
+
+    if (!entry) {
+      return;
+    }
+
+    entry.object.removeFromParent();
+
+    entry.object.material.dispose();
+
+    this.index.delete(id);
+  }
+
+  private createEntityEntry(
+    entity: SpaceEntity,
+    localPosition: Vector3,
+    radius: number,
+  ): EntitySceneEntry {
+    const style = resolvedEntityStyle(entity, this.extensions.themes.current);
+
+    const material = new MeshBasicMaterial({
+      color: style.color,
+
+      transparent: style.bodyOpacity < 0.999,
+
+      opacity: clamp(style.bodyOpacity, 0, 1),
+
+      depthWrite: style.bodyOpacity >= 0.999,
+    });
+
+    if (entity.kind === "star") {
+      material.blending = AdditiveBlending;
+    }
+
+    const object = new Mesh(this.unitSphere, material);
+
+    object.name = `entity:${entity.id}`;
+
+    object.userData["entityId"] = entity.id;
+
+    object.userData["entityKind"] = entity.kind;
+
+    object.position.copy(localPosition);
+
+    object.scale.setScalar(radius);
+
+    this.entityRoot.add(object);
+
+    const entry: EntitySceneEntry = {
+      id: entity.id,
+
+      entity,
+
+      object,
+
+      position: localPosition.clone(),
+
+      radius,
+    };
+
+    this.index.set(entity.id, entry);
+
+    return entry;
+  }
+
+  private updateEntityEntry(
+    entry: EntitySceneEntry,
+    entity: SpaceEntity,
+    localPosition: Vector3,
+    radius: number,
+    state: UniverseState,
+  ): void {
+    entry.entity = entity;
+
+    entry.position.copy(localPosition);
+
+    entry.radius = radius;
+
+    entry.object.position.copy(localPosition);
+
+    const uiSelection = this.extensions.selection.getSnapshot();
+
+    const selected =
+      state.selectedId === entity.id || uiSelection.selectedId === entity.id;
+
+    const focused =
+      state.focusId === entity.id || uiSelection.focusedId === entity.id;
+
+    const scaleMultiplier = focused ? 1.3 : selected ? 1.15 : 1;
+
+    entry.object.scale.setScalar(radius * scaleMultiplier);
+
+    const theme = this.extensions.themes.current;
+
+    const style = resolvedEntityStyle(entity, theme);
+
+    let color = style.color;
+
+    if (selected) {
+      color = theme.selection;
+    }
+
+    if (focused) {
+      color = theme.focus;
+    }
+
+    entry.object.material.color.setHex(color);
+
+    entry.object.material.opacity = clamp(style.bodyOpacity, 0, 1);
+
+    entry.object.material.transparent = entry.object.material.opacity < 0.999;
+
+    entry.object.material.depthWrite = entry.object.material.opacity >= 0.999;
+
+    entry.object.material.blending =
+      entity.kind === "star" ? AdditiveBlending : NormalBlending;
+
+    entry.object.material.needsUpdate = true;
+
+    entry.object.userData["entityKind"] = entity.kind;
+
+    entry.object.userData["physicalRadiusMeters"] = entityRadiusMeters(entity);
+
+    entry.object.userData["renderRadius"] = radius;
+  }
+
+  private syncEntities(frame: RenderFrame): void {
+    const desired = this.buildDesiredEntityIds(frame);
+
+    for (const id of [...this.index.keys()]) {
+      if (!desired.has(id)) {
+        this.removeEntity(id);
+      }
+    }
+
+    const state = frame.state;
+
+    this.floatingOrigin.setFromState(state);
+
+    for (const id of desired) {
+      const entity = state.entities.get(id);
+
+      if (!entity) {
+        this.removeEntity(id);
+
+        continue;
+      }
+
+      const absolute = this.frameSpace.resolve(entity, state);
+
+      if (!absolute) {
+        this.removeEntity(id);
+
+        continue;
+      }
+
+      const local = this.floatingOrigin.toLocal(absolute);
+
+      const radius = entitySceneRadius(entity, state.scale.metersPerUnit);
+
+      let entry = this.index.get(id);
+
+      if (!entry) {
+        entry = this.createEntityEntry(entity, local, radius);
+      }
+
+      this.updateEntityEntry(entry, entity, local, radius, state);
+    }
+
+    if (this.lastVisibleCount !== this.index.size) {
+      this.lastVisibleCount = this.index.size;
+
+      this.extensions.events.emit("visibility.change", {
+        visibleCount: this.index.size,
+      });
+    }
+  }
+
+  private disposeOrbit(id: EntityId): void {
+    const entry = this.orbitEntries.get(id);
+
+    if (!entry) {
+      return;
+    }
+
+    entry.line.removeFromParent();
+
+    entry.line.geometry.dispose();
+
+    entry.line.material.dispose();
+
+    this.orbitEntries.delete(id);
+  }
+
+  private clearOrbits(): void {
+    for (const id of [...this.orbitEntries.keys()]) {
+      this.disposeOrbit(id);
+    }
+  }
+
+  private syncOrbits(frame: RenderFrame): void {
+    const state = frame.state;
+
+    const enabled = state.overlays.orbits && state.settings.graphics.orbitLines;
+
+    if (!enabled) {
+      this.clearOrbits();
+
+      return;
+    }
+
+    const desired = new Set<EntityId>();
+
+    const quality = this.extensions.quality.profile;
+
+    const samples = Math.round(clamp(96 * quality.orbitDetail, 24, 192));
+
+    for (const entityEntry of this.index.values()) {
+      const entity = entityEntry.entity;
+
+      if (
+        !entity.parentId ||
+        !entity.orbit ||
+        entity.orbit.semiMajorAxisM === undefined
+      ) {
+        continue;
+      }
+
+      const parentPosition = this.index.getPosition(entity.parentId);
+
+      if (!parentPosition) {
+        continue;
+      }
+
+      const signature = orbitSignature(
+        entity,
+        state.scale.metersPerUnit,
+        samples,
+      );
+
+      let orbitEntry = this.orbitEntries.get(entity.id);
+
+      if (!orbitEntry || orbitEntry.signature !== signature) {
+        if (orbitEntry) {
+          this.disposeOrbit(entity.id);
+        }
+
+        const geometry = createOrbitGeometry(
+          entity,
+          state.scale.metersPerUnit,
+          samples,
+        );
+
+        if (!geometry) {
+          continue;
+        }
+
+        const material = new LineBasicMaterial({
+          color: this.extensions.themes.current.orbit,
+
+          transparent: true,
+
+          opacity: 0.38,
+
+          depthWrite: false,
+        });
+
+        const line = new LineLoop(geometry, material);
+
+        line.name = `orbit:${entity.id}`;
+
+        line.frustumCulled = true;
+
+        this.orbitRoot.add(line);
+
+        orbitEntry = {
+          line,
+
+          signature,
+        };
+
+        this.orbitEntries.set(entity.id, orbitEntry);
+      }
+
+      orbitEntry.line.position.copy(parentPosition);
+
+      orbitEntry.line.material.color.setHex(
+        this.extensions.themes.current.orbit,
+      );
+
+      desired.add(entity.id);
+    }
+
+    for (const id of [...this.orbitEntries.keys()]) {
+      if (!desired.has(id)) {
+        this.disposeOrbit(id);
+      }
+    }
+  }
+
+  private syncCamera(frame: RenderFrame): void {
+    const camera = this.requireCamera();
+
+    const state = frame.state;
+
+    camera.position.set(0, 0, 0);
+
+    const nextFov = clamp(state.camera.fieldOfView, 5, 140);
+
+    if (camera.fov !== nextFov) {
+      camera.fov = nextFov;
+
+      camera.updateProjectionMatrix();
+    }
+
+    const targetId = state.camera.targetId ?? state.focusId;
+
+    if (targetId !== undefined) {
+      const target = this.index.getPosition(targetId);
+
+      if (target && target.lengthSq() > 1e-18) {
+        camera.lookAt(target);
+      }
+    }
+
+    const event: {
+      position: Vec3;
+
+      targetId?: EntityId;
+    } = {
+      position: [
+        state.camera.position[0],
+
+        state.camera.position[1],
+
+        state.camera.position[2],
+      ],
+    };
+
+    if (targetId !== undefined) {
+      event.targetId = targetId;
+    }
+
+    this.extensions.events.emit("camera.change", event);
+  }
+
+  private updateTheme(): void {
+    const scene = this.requireScene();
+
+    if (this.alpha) {
+      scene.background = null;
+
+      return;
+    }
+
+    const color = this.extensions.themes.current.background;
+
+    if (scene.background instanceof Color) {
+      scene.background.setHex(color);
+    } else {
+      scene.background = new Color(color);
+    }
+  }
+
+  private updateStats(frameMilliseconds: number): void {
+    const renderer = this.requireRenderer();
+
+    const render = renderer.info.render;
+
+    this.stats.drawCalls = render.calls;
+
+    this.stats.triangles = render.triangles;
+
+    this.stats.points = render.points;
+
+    this.stats.lines = render.lines;
+
+    this.stats.objects = this.index.size;
+
+    this.stats.sceneObjects =
+      this.index.size +
+      this.orbitEntries.size +
+      this.extensions.denseLayers.count +
+      3;
+
+    this.stats.frameMs = frameMilliseconds;
+
+    this.stats.visibleEntities = this.index.size;
+  }
+
+  render(frame: RenderFrame): void {
+    const renderer = this.requireRenderer();
+
+    const scene = this.requireScene();
+
+    const camera = this.requireCamera();
+
+    const started = performance.now();
+
+    this.extensions.beforeFrame(frame);
+
+    this.syncEntities(frame);
+
+    this.syncOrbits(frame);
+
+    this.syncCamera(frame);
+
+    this.updateTheme();
+
+    this.extensions.afterEntitySync();
+
+    this.extensions.syncLabels(frame);
+
+    renderer.render(scene, camera);
+
+    this.extensions.markRendered();
+
+    const frameMilliseconds = performance.now() - started;
+
+    this.updateStats(frameMilliseconds);
+
+    this.extensions.endFrame(frame, this.stats);
+  }
+
+  resize(width: number, height: number, pixelRatio: number): void {
+    this.width = Math.max(1, Math.floor(width));
+
+    this.height = Math.max(1, Math.floor(height));
+
+    const renderer = this.rendererValue;
+
+    const camera = this.cameraValue;
+
+    if (!renderer || !camera) {
+      return;
+    }
+
+    const qualityLimit = this.extensions.quality.profile.pixelRatioLimit;
+
+    const ratio = clamp(pixelRatio, 0.5, qualityLimit);
+
+    renderer.setPixelRatio(ratio);
+
+    renderer.setSize(this.width, this.height, false);
+
+    camera.aspect = this.width / this.height;
+
+    camera.updateProjectionMatrix();
+
+    this.extensions.resize(this.width, this.height, ratio);
+  }
+
+  setFrameTransformProvider(provider: FrameTransformProvider | null): void {
+    this.frameSpace.setTransformProvider(provider);
+  }
 
   getStats(): RendererStats {
-    return this.stats;
+    return {
+      ...this.stats,
+    };
+  }
+
+  get scene(): Scene | null {
+    return this.sceneValue;
+  }
+
+  get camera(): PerspectiveCamera | null {
+    return this.cameraValue;
+  }
+
+  get threeRenderer(): WebGLRenderer | null {
+    return this.rendererValue;
+  }
+
+  get picking(): PickingController | null {
+    return this.pickingValue;
+  }
+
+  private clearEntityObjects(): void {
+    for (const entry of this.index.values()) {
+      entry.object.removeFromParent();
+
+      entry.object.material.dispose();
+    }
+
+    this.index.clear();
+  }
+
+  dispose(): void {
+    this.extensions.dispose();
+
+    this.clearOrbits();
+
+    this.clearEntityObjects();
+
+    this.pickingValue?.dispose();
+
+    this.pickingValue = null;
+
+    this.unitSphere.dispose();
+
+    const renderer = this.rendererValue;
+
+    if (renderer) {
+      const canvas = renderer.domElement;
+
+      renderer.dispose();
+
+      canvas.remove();
+    }
+
+    this.sceneValue?.clear();
+
+    this.rendererValue = null;
+
+    this.cameraValue = null;
+
+    this.sceneValue = null;
+
+    this.containerValue = null;
+
+    this.lastVisibleCount = -1;
+
+    this.stats.drawCalls = 0;
+
+    this.stats.triangles = 0;
+
+    this.stats.points = 0;
+
+    this.stats.lines = 0;
+
+    this.stats.objects = 0;
+
+    this.stats.sceneObjects = 0;
+
+    this.stats.frameMs = 0;
+
+    this.stats.visibleEntities = 0;
   }
 }
 
@@ -922,7 +2343,7 @@ export class DomLabelLayer {
 
   private textFor(entity: SpaceEntity): string {
     if (this.style.showKind) {
-      return `${entity.name} · ` + entity.kind;
+      return `${entity.name} Â· ` + entity.kind;
     }
 
     return entity.name;
@@ -3044,7 +4465,7 @@ export class HoverTooltip {
     x: number,
     y: number,
   ): void {
-    this.element.textContent = `${data.name} · ${data.kind}`;
+    this.element.textContent = `${data.name} Â· ${data.kind}`;
 
     this.element.style.left = `${x}px`;
 
